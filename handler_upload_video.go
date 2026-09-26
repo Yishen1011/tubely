@@ -5,6 +5,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -96,7 +97,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	assetPath := getAssetPath(mediaType)
+	// Check for aspect ratio to add prefix onto key based on video aspect ratio
+	directory := ""
+	aspectRatio, err := getVideoAspectRatio(dst.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to obtain aspect ratio of video", err)
+		return
+	}
+	switch aspectRatio {
+	case "16:9":
+		directory = "landscape"
+	case "9:16":
+		directory = "portrait"
+	default:
+		directory = "other"
+	}
+
+	key := path.Join(directory, getAssetPath(mediaType))
 
 	// *os.File which allows to be Read by s3.PutObjectInput.Body
 	// aws.String inputs string and outputs *string
@@ -104,7 +121,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	if _, err := cfg.s3Client.PutObject(r.Context(), 
 		&s3.PutObjectInput{
 			Bucket:      aws.String(cfg.s3Bucket),
-			Key:         aws.String(assetPath),
+			Key:         aws.String(key),
 			Body:        dst,
 			ContentType: aws.String(mediaType),
 		},
@@ -114,7 +131,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Update VideoURL video metadata in database
-	url := cfg.getVideoURL(cfg.s3Bucket, cfg.s3Region, assetPath)
+	url := cfg.getVideoURL(cfg.s3Bucket, cfg.s3Region, key)
 	video.VideoURL = &url
 
 	err = cfg.db.UpdateVideo(video)

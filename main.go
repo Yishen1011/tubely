@@ -70,9 +70,9 @@ func main() {
 		log.Fatal("S3_REGION environment variable is not set")
 	}
 
-	s3config, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(s3Region),)
+	s3config, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(s3Region))
 	if err != nil {
-		log.Fatal("Couldn't load s3config from s3Region")
+		log.Fatal(err)
 	}
 
 	s3Client := s3.NewFromConfig(s3config)
