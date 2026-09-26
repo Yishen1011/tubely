@@ -85,40 +85,27 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	// Upload file to a temporary file on disk
 	// func CreateTemp(dir, pattern string) (*os.File, error)
-	dst, err := os.CreateTemp("", "tubely-upload.mp4")
+	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to create temp file", err)
 		return
 	}
-	// dst.Name() returns the name of the file as presented to Open.
-	defer os.Remove(dst.Name())
-	defer dst.Close()
-	if _, err = io.Copy(dst, file); err != nil {
+	// tempFile.Name() returns the name of the file as presented to Open.
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+	if _, err = io.Copy(tempFile, file); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error copying file", err)
 		return
 	}
 
-	if _, err = dst.Seek(0, io.SeekStart); err != nil {
+	if _, err = tempFile.Seek(0, io.SeekStart); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error resetting tmp file pointer", err)
 		return
 	}
 
-	pathFast, err := processVideoForFastStart(dst.Name())
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to process video for fast start", err)
-		return
-	}
-	dstFast, err := os.Open(pathFast)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to open fast video temp file", err)
-		return
-	}
-	defer os.Remove(dstFast.Name())
-	defer dstFast.Close()
-
 	// Check for aspect ratio to add prefix onto key based on video aspect ratio
 	directory := ""
-	aspectRatio, err := getVideoAspectRatio(dst.Name())
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to obtain aspect ratio of video", err)
 		return
@@ -134,6 +121,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	key := path.Join(directory, getAssetPath(mediaType))
 
+	// Function to help fast start for video
+	// Only GET request 1 instead of 3
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to process video for fast start", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open fast video temp file", err)
+		return
+	}
+	defer processedFile.Close()
+
 	// *os.File which allows to be Read by s3.PutObjectInput.Body
 	// aws.String inputs string and outputs *string
 	// func (c *Client) PutObject(ctx context.Context, params *PutObjectInput, optFns ...func(*Options)) (*PutObjectOutput, error)
@@ -141,7 +144,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		&s3.PutObjectInput{
 			Bucket:      aws.String(cfg.s3Bucket),
 			Key:         aws.String(key),
-			Body:        dstFast,
+			Body:        processedFile,
 			ContentType: aws.String(mediaType),
 		},
 	); err != nil {
@@ -211,20 +214,31 @@ func CalculateAspectRatio(width, height int) string {
 	return "other"
 }
 
-func processVideoForFastStart(filePath string) (string, error) {
-	processPath := fmt.Sprintf("%s.processing", filePath)
+func processVideoForFastStart(inputFilePath string) (string, error) {
+	processedFilePath := fmt.Sprintf("%s.processing", inputFilePath)
 	
 	cmd := exec.Command(
 		"ffmpeg",
-		"-i", filePath,
+		"-i", inputFilePath,
 		"-c", "copy",
 		"-movflags", "faststart",
 		"-f", "mp4", 
-		processPath,
+		processedFilePath,
 	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
 
-	return processPath, nil
+	fileInfo, err := os.Stat(processedFilePath)
+	if err != nil {
+		return "", fmt.Errorf("could not stat processed file: %v", err)
+	}
+	if fileInfo.Size() == 0 {
+		return "", fmt.Errorf("processed file is empty")
+	}
+
+	return processedFilePath, nil
 }
