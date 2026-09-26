@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"encoding/json"
 	"io"
 	"mime"
+	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -97,6 +103,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	pathFast, err := processVideoForFastStart(dst.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to process video for fast start", err)
+		return
+	}
+	dstFast, err := os.Open(pathFast)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open fast video temp file", err)
+		return
+	}
+	defer os.Remove(dstFast.Name())
+	defer dstFast.Close()
+
 	// Check for aspect ratio to add prefix onto key based on video aspect ratio
 	directory := ""
 	aspectRatio, err := getVideoAspectRatio(dst.Name())
@@ -122,7 +141,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		&s3.PutObjectInput{
 			Bucket:      aws.String(cfg.s3Bucket),
 			Key:         aws.String(key),
-			Body:        dst,
+			Body:        dstFast,
 			ContentType: aws.String(mediaType),
 		},
 	); err != nil {
@@ -141,4 +160,71 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+func getVideoAspectRatio(filePath string) (string, error)  {
+	cmd := exec.Command(
+		"ffprobe", 
+		"-v", "error", 
+		"-print_format", "json", 
+		"-show_streams", filePath,
+	)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	var output struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		return "", err
+	}
+	if len(output.Streams) == 0 {
+		return "", errors.New("There are no streams on the video")
+	}
+
+	return CalculateAspectRatio(output.Streams[0].Width, output.Streams[0].Height), nil
+}
+
+func CalculateAspectRatio(width, height int) string {
+	expected16by9 := 16.0 / 9.0
+	expected9by16 := 9.0 / 16.0
+	tolerance := 0.01 
+
+	actualRatio := float64(width) / float64(height)
+
+	difference16by9 := actualRatio - expected16by9
+    difference9by16 := actualRatio - expected9by16
+
+	if math.Abs(difference16by9) < tolerance {
+		return "16:9"
+	} else if math.Abs(difference9by16) < tolerance {
+		return "9:16"
+	}
+
+	return "other"
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	processPath := fmt.Sprintf("%s.processing", filePath)
+	
+	cmd := exec.Command(
+		"ffmpeg",
+		"-i", filePath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		"-f", "mp4", 
+		processPath,
+	)
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	return processPath, nil
 }
