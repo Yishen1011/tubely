@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/Yishen1011/tubely/internal/auth"
@@ -95,6 +96,12 @@ func (cfg *apiConfig) handlerVideoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	video, err = cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error  generate presigned URL", err)
+		return
+	}
+	
 	respondWithJSON(w, http.StatusOK, video)
 }
 
@@ -116,5 +123,15 @@ func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	for i, video := range videos {
+		signedVideo, err := cfg.dbVideoToSignedVideo(video)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Error generate presigned URL", err)
+			return
+		}
+		fmt.Printf("signing video %v, url=%v\n", video.ID, video.VideoURL)
+		videos[i] = signedVideo
+	}
+	
 	respondWithJSON(w, http.StatusOK, videos)
 }
